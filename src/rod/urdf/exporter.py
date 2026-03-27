@@ -1,60 +1,379 @@
+from __future__ import annotations
+
 import abc
 import copy
 import dataclasses
-from typing import Any, ClassVar
+import logging
+from typing import (
+    Any,
+    ClassVar,
+    TypeAlias,
+    TypeVar,
+)
 
 import numpy as np
 import xmltodict
 
 import rod
-from rod import logging
+
+# Type aliases for better readability
+FramesList: TypeAlias = list[dict[str, Any]]
+JointsList: TypeAlias = list[dict[str, Any]]
+PreserveJointsOption: TypeAlias = bool | list[str]
+T = TypeVar("T")  # Generic type for optional handling
+
+_ZERO_POSE = np.zeros(6)
+
+
+def _fmt(values) -> str:
+    """Format a sequence of numbers as a space-separated string."""
+    return " ".join(str(v) for v in values)
 
 
 @dataclasses.dataclass
 class UrdfExporter(abc.ABC):
-    """Resources to convert an in-memory ROD model to URDF."""
+    """Resources to convert an in-memory ROD model to URDF with elegant Pythonic patterns."""
 
-    # The string to use for each indentation level.
-    indent: str = "  "
+    indent: str = "  "  # String to use for each indentation level
+    pretty: bool = False  # Whether to include indentation and newlines
+    gazebo_preserve_fixed_joints: PreserveJointsOption = False  # Joints to preserve
 
-    # Whether to include indentation and newlines in the output.
-    pretty: bool = False
-
-    # Whether to inject additional `<gazebo>` elements in the resulting URDF
-    # to preserve fixed joints in case of re-loading into sdformat.
-    # If a list of strings is passed, only the listed fixed joints will be preserved.
-    gazebo_preserve_fixed_joints: bool | list[str] = False
-
-    SupportedSdfJointTypes: ClassVar[set[str]] = {
+    # Class constants
+    SUPPORTED_JOINT_TYPES: ClassVar[set[str]] = {
         "revolute",
         "continuous",
         "prismatic",
         "fixed",
     }
 
-    DefaultMaterial: ClassVar[dict[str, Any]] = {
+    DEFAULT_MATERIAL: ClassVar[dict[str, Any]] = {
         "@name": "default_material",
         "color": {
-            "@rgba": " ".join(np.array([1, 1, 1, 1], dtype=str)),
+            "@rgba": _fmt([1, 1, 1, 1]),
         },
     }
 
-    @staticmethod
+    def to_urdf_string(self, sdf: rod.Sdf | rod.Model) -> str:
+        """Convert an in-memory SDF model to a URDF string.
+
+        Args:
+            sdf: The SDF model parsed by ROD to convert.
+
+        Returns:
+            The URDF string representing the converted SDF model.
+        """
+        # Work with a copy to avoid modifying the original
+        sdf = copy.deepcopy(sdf)
+
+        # Get the model (handle both Sdf and Model types)
+        model = self._extract_model(sdf)
+        logging.debug(f"Converting model '{model.name}' to URDF")
+
+        # Prepare the model
+        self._prepare_model_for_conversion(model)
+
+        # Process frames and get extra elements
+        extra_links, extra_joints = self._process_frames(model)
+
+        # Handle fixed joints preservation
+        preserved_joints = self._get_preserved_fixed_joints(model)
+
+        # Build and return the URDF
+        return self._build_urdf_string(
+            model, extra_links, extra_joints, preserved_joints
+        )
+
+    @classmethod
     def sdf_to_urdf_string(
+        cls,
         sdf: rod.Sdf | rod.Model,
         pretty: bool = False,
         indent: str = "  ",
-        gazebo_preserve_fixed_joints: bool | list[str] = False,
+        gazebo_preserve_fixed_joints: PreserveJointsOption = False,
     ) -> str:
+        """Legacy method maintained for backward compatibility."""
 
-        msg = "This method is deprecated, please use '{}' instead."
-        logging.warning(msg.format("UrdfExporter.to_urdf_string"))
+        logging.warning(
+            "This method is deprecated, please use 'UrdfExporter.to_urdf_string' instead."
+        )
 
-        return UrdfExporter(
+        exporter = cls(
             pretty=pretty,
             indent=indent,
             gazebo_preserve_fixed_joints=gazebo_preserve_fixed_joints,
-        ).to_urdf_string(sdf=sdf)
+        )
+
+        return exporter.to_urdf_string(sdf)
+
+    def _extract_model(self, sdf: rod.Sdf | rod.Model) -> rod.Model:
+        """Extract the model from an SDF object or return the model directly."""
+
+        if isinstance(sdf, rod.Model):
+            return sdf
+
+        if len(sdf.models()) > 1:
+            raise RuntimeError("URDF only supports one robot element")
+
+        return sdf.models()[0]
+
+    def _prepare_model_for_conversion(self, model: rod.Model) -> None:
+        """Prepare the model for conversion to URDF format."""
+
+        # Remove all poses that could be assumed being implicit
+        model.resolve_frames(is_top_level=True, explicit_frames=False)
+
+        # Handle sub-models (not supported in URDF)
+        if model.models():
+            logging.warning(f"Ignoring unsupported sub-models of model '{model.name}'")
+            model.model = None
+
+        # Check model pose validity
+        self._validate_model_pose(model)
+
+        # Process canonical link
+        self._process_canonical_link(model)
+
+        # Convert all poses to use the URDF frames convention
+        model.switch_frame_convention(
+            frame_convention=rod.FrameConvention.Urdf,
+            explicit_frames=True,
+            attach_frames_to_links=True,
+        )
+
+        # Clean up link poses (in URDF, links are attached to parent joint frames)
+        for link in model.links():
+            if link.pose is not None and not np.allclose(link.pose.pose, _ZERO_POSE):
+                logging.warning(f"Ignoring non-trivial pose of link '{link.name}'")
+                link.pose = None
+
+    def _validate_model_pose(self, model: rod.Model) -> None:
+        """Validate the model pose for URDF compatibility."""
+
+        if model.pose is not None and model.pose.relative_to not in {"", None}:
+            raise RuntimeError("Invalid model pose")
+
+        if (
+            model.is_fixed_base()
+            and model.pose is not None
+            and not np.allclose(model.pose.pose, _ZERO_POSE)
+        ):
+            logging.warning("Ignoring non-trivial pose of fixed-base model")
+            model.pose = None
+
+    def _process_canonical_link(self, model: rod.Model) -> None:
+        """Process the canonical link of the model."""
+
+        canonical_link_name = model.get_canonical_link()
+        logging.debug(f"Detected '{canonical_link_name}' as root link")
+
+        canonical_link = next(l for l in model.links() if l.name == canonical_link_name)
+
+        # Check if canonical link has a custom pose
+        if (
+            not model.is_fixed_base()
+            and canonical_link.pose is not None
+            and not np.allclose(canonical_link.pose.pose, _ZERO_POSE)
+        ):
+            logging.warning(
+                f"Ignoring non-trivial pose of canonical link '{canonical_link.name}'"
+            )
+            canonical_link.pose = None
+
+    def _process_frames(self, model: rod.Model) -> tuple[FramesList, JointsList]:
+        """Convert SDF frames to URDF equivalent chains."""
+
+        extra_links = []
+        extra_joints = []
+
+        for frame in model.frames():
+            dummy_link = self._create_dummy_link(frame)
+            new_joint = self._create_dummy_joint(frame, dummy_link["@name"])
+
+            logging.debug(
+                f"Processing frame '{frame.name}': created new dummy chain "
+                f"{frame.attached_to}->({new_joint['@name']})->{dummy_link['@name']}"
+            )
+
+            extra_links.append(dummy_link)
+            extra_joints.append(new_joint)
+
+        return extra_links, extra_joints
+
+    def _create_dummy_link(self, frame: rod.Frame) -> dict[str, Any]:
+        """Create a dummy link for a frame."""
+
+        return {
+            "@name": frame.name,
+            "inertial": {
+                "origin": {"@xyz": "0 0 0", "@rpy": "0 0 0"},
+                "mass": {"@value": 0.0},
+                "inertia": {
+                    "@ixx": 0.0,
+                    "@ixy": 0.0,
+                    "@ixz": 0.0,
+                    "@iyy": 0.0,
+                    "@iyz": 0.0,
+                    "@izz": 0.0,
+                },
+            },
+        }
+
+    def _create_dummy_joint(
+        self, frame: rod.Frame, dummy_link_name: str
+    ) -> dict[str, Any]:
+        """Create a dummy joint for a frame."""
+
+        # The pose of the frame in FrameConvention.Urdf refers to the parent link
+        assert frame.pose.relative_to == frame.attached_to
+
+        return {
+            "@name": f"{frame.attached_to}_to_{dummy_link_name}",
+            "@type": "fixed",
+            "parent": {"@link": frame.attached_to},
+            "child": {"@link": dummy_link_name},
+            "origin": {
+                "@xyz": _fmt(frame.pose.xyz),
+                "@rpy": _fmt(frame.pose.rpy),
+            },
+        }
+
+    def _get_preserved_fixed_joints(self, model: rod.Model) -> list[str]:
+        """Get the list of fixed joints to preserve."""
+
+        preserve_option = copy.copy(self.gazebo_preserve_fixed_joints)
+
+        # Convert boolean option to list of joint names
+        if preserve_option is True:
+            preserve_option = [j.name for j in model.joints() if j.type == "fixed"]
+        elif preserve_option is False:
+            preserve_option = []
+
+        assert isinstance(preserve_option, list)
+
+        # Validate that all specified joints exist
+        model_joint_names = {j.name for j in model.joints()}
+        for joint_name in preserve_option:
+            logging.debug(f"Preserving fixed joint '{joint_name}'")
+            if joint_name not in model_joint_names:
+                raise RuntimeError(f"Joint '{joint_name}' not found in the model")
+
+        return preserve_option
+
+    def _build_urdf_string(
+        self,
+        model: rod.Model,
+        extra_links: FramesList,
+        extra_joints: JointsList,
+        preserved_joints: list[str],
+    ) -> str:
+        """Build the URDF string from the model and additional elements."""
+
+        # Define world link for fixed-base models
+        world_link = rod.Link(name="world")
+        world_link_dict = [world_link.to_dict()] if model.is_fixed_base() else []
+
+        # Create the URDF dictionary
+        urdf_dict = {
+            "robot": {
+                "@name": model.name,
+                "link": world_link_dict
+                + self._create_link_elements(model)
+                + extra_links,
+                "joint": self._create_joint_elements(model) + extra_joints,
+                "gazebo": [
+                    {
+                        "@reference": fixed_joint,
+                        "preserveFixedJoint": "true",
+                        "disableFixedJointLumping": "true",
+                    }
+                    for fixed_joint in preserved_joints
+                ],
+            }
+        }
+
+        # Convert to XML string
+        return xmltodict.unparse(
+            input_dict=urdf_dict,
+            pretty=self.pretty,
+            indent=self.indent,
+            short_empty_elements=True,
+        )
+
+    def _create_link_elements(self, model: rod.Model) -> list[dict[str, Any]]:
+        """Create the link elements for the URDF."""
+
+        return [
+            {
+                "@name": link.name,
+                "inertial": self._create_inertial_element(link),
+                "visual": self._create_visual_elements(link),
+                "collision": self._create_collision_elements(link),
+            }
+            for link in model.links()
+        ]
+
+    def _create_inertial_element(self, link: rod.Link) -> dict[str, Any]:
+        """Create an inertial element for a link."""
+
+        return {
+            "origin": {
+                "@xyz": _fmt(link.inertial.pose.xyz),
+                "@rpy": _fmt(link.inertial.pose.rpy),
+            },
+            "mass": {"@value": link.inertial.mass},
+            "inertia": {
+                "@ixx": link.inertial.inertia.ixx,
+                "@ixy": link.inertial.inertia.ixy,
+                "@ixz": link.inertial.inertia.ixz,
+                "@iyy": link.inertial.inertia.iyy,
+                "@iyz": link.inertial.inertia.iyz,
+                "@izz": link.inertial.inertia.izz,
+            },
+        }
+
+    def _create_visual_elements(self, link: rod.Link) -> list[dict[str, Any]]:
+        """Create visual elements for a link."""
+
+        return [
+            {
+                "@name": visual.name,
+                "origin": {
+                    "@xyz": _fmt(visual.pose.xyz),
+                    "@rpy": _fmt(visual.pose.rpy),
+                },
+                "geometry": self._rod_geometry_to_xmltodict(visual.geometry),
+                **(
+                    {"material": self._rod_material_to_xmltodict(visual.material)}
+                    if visual.material is not None
+                    else {}
+                ),
+            }
+            for visual in link.visuals()
+        ]
+
+    def _create_collision_elements(self, link: rod.Link) -> list[dict[str, Any]]:
+        """Create collision elements for a link."""
+
+        return [
+            {
+                "@name": collision.name,
+                "origin": {
+                    "@xyz": _fmt(collision.pose.xyz),
+                    "@rpy": _fmt(collision.pose.rpy),
+                },
+                "geometry": self._rod_geometry_to_xmltodict(collision.geometry),
+            }
+            for collision in link.collisions()
+        ]
+
+    def _create_joint_elements(self, model: rod.Model) -> list[dict[str, Any]]:
+        """Create the joint elements for the URDF."""
+
+        return [
+            self._joint_to_dict(joint)
+            for joint in model.joints()
+            if joint.type in self.SUPPORTED_JOINT_TYPES
+        ]
 
     @staticmethod
     def _get_urdf_joint_type(joint: rod.Joint) -> str:
@@ -74,427 +393,128 @@ class UrdfExporter(abc.ABC):
             return "continuous"
         return joint.type
 
-    @staticmethod
-    def _joint_to_urdf_dict(joint: rod.Joint) -> dict[str, Any]:
-        """
-        Convert a ROD joint to a URDF joint dictionary.
+    def _joint_to_dict(self, joint: rod.Joint) -> dict[str, Any]:
+        """Convert a joint to a dictionary representation."""
 
-        Args:
-            joint: The ROD joint to convert.
+        urdf_joint_type = self._get_urdf_joint_type(joint)
 
-        Returns:
-            A dictionary representing the joint in URDF format.
-        """
-        # Compute the corrected joint type once
-        urdf_joint_type = UrdfExporter._get_urdf_joint_type(joint)
-
-        return {
+        joint_dict = {
             "@name": joint.name,
             "@type": urdf_joint_type,
             "origin": {
-                "@xyz": " ".join(map(str, joint.pose.xyz)),
-                "@rpy": " ".join(map(str, joint.pose.rpy)),
+                "@xyz": _fmt(joint.pose.xyz),
+                "@rpy": _fmt(joint.pose.rpy),
             },
             "parent": {"@link": joint.parent},
             "child": {"@link": joint.child},
-            **(
-                {"axis": {"@xyz": " ".join(map(str, joint.axis.xyz.xyz))}}
-                if joint.axis is not None
-                and joint.axis.xyz is not None
-                and urdf_joint_type != "fixed"
-                else {}
-            ),
-            # calibration: does not have any SDF corresponding element
-            **(
-                {
-                    "dynamics": {
-                        **(
-                            {"@damping": joint.axis.dynamics.damping}
-                            if joint.axis.dynamics.damping is not None
-                            else {}
-                        ),
-                        **(
-                            {"@friction": joint.axis.dynamics.friction}
-                            if joint.axis.dynamics.friction is not None
-                            else {}
-                        ),
-                    }
-                }
-                if joint.axis is not None
-                and joint.axis.dynamics is not None
-                and {joint.axis.dynamics.damping, joint.axis.dynamics.friction}
-                != {None}
-                and urdf_joint_type != "fixed"
-                else {}
-            ),
-            **(
-                {
-                    "limit": {
-                        **(
-                            {"@effort": joint.axis.limit.effort}
-                            if joint.axis.limit.effort is not None
-                            else (
-                                {"@effort": np.finfo(np.float32).max}
-                                if urdf_joint_type
-                                in {"revolute", "prismatic", "continuous"}
-                                else {}
-                            )
-                        ),
-                        **(
-                            {"@velocity": joint.axis.limit.velocity}
-                            if joint.axis.limit.velocity is not None
-                            else (
-                                {"@velocity": np.finfo(np.float32).max}
-                                if urdf_joint_type
-                                in {"revolute", "prismatic", "continuous"}
-                                else {}
-                            )
-                        ),
-                        **(
-                            {"@lower": joint.axis.limit.lower}
-                            if joint.axis.limit.lower is not None
-                            and not np.isinf(joint.axis.limit.lower)
-                            and urdf_joint_type in {"revolute", "prismatic"}
-                            else {}
-                        ),
-                        **(
-                            {"@upper": joint.axis.limit.upper}
-                            if joint.axis.limit.upper is not None
-                            and not np.isinf(joint.axis.limit.upper)
-                            and urdf_joint_type in {"revolute", "prismatic"}
-                            else {}
-                        ),
-                    },
-                }
-                if joint.axis is not None
-                and joint.axis.limit is not None
-                and urdf_joint_type != "fixed"
-                else {}
-            ),
-            # mimic: does not have any SDF corresponding element
-            # safety_controller: does not have any SDF corresponding element
         }
 
-    def to_urdf_string(self, sdf: rod.Sdf | rod.Model) -> str:
-        """
-        Convert an in-memory SDF model to a URDF string.
-
-        Args:
-            sdf: The SDF model parsed by ROD to convert.
-
-        Returns:
-            The URDF string representing the converted SDF model.
-        """
-
-        # Operate on a copy of the sdf object
-        sdf = copy.deepcopy(sdf)
-
-        if isinstance(sdf, rod.Sdf) and len(sdf.models()) > 1:
-            raise RuntimeError("URDF only supports one robot element")
-
-        # Get the model
-        model = sdf if isinstance(sdf, rod.Model) else sdf.models()[0]
-        logging.debug(f"Converting model '{model.name}' to URDF")
-
-        # Remove all poses that could be assumed being implicit
-        model.resolve_frames(is_top_level=True, explicit_frames=False)
-
-        # Model composition is not supported, ignoring sub-models
-        if len(model.models()) > 0:
-            msg = f"Ignoring unsupported sub-models of model '{model.name}'"
-            logging.warning(msg=msg)
-
-            model.model = None
-
-        # Check that the model pose has no reference frame (implicit frame is world)
-        if model.pose is not None and model.pose.relative_to not in {"", None}:
-            raise RuntimeError("Invalid model pose")
-
-        # If the model pose is not zero, warn that it will be ignored.
-        # In fact, the pose wrt world of the canonical link (base) will be used instead.
+        # Add axis if needed and not a fixed joint
         if (
-            model.is_fixed_base()
-            and model.pose is not None
-            and not np.allclose(model.pose.pose, np.zeros(6))
+            joint.axis is not None
+            and joint.axis.xyz is not None
+            and urdf_joint_type != "fixed"
         ):
-            logging.warning("Ignoring non-trivial pose of fixed-base model")
-            model.pose = None
+            joint_dict["axis"] = {"@xyz": _fmt(joint.axis.xyz.xyz)}
 
-        # Get the canonical link of the model
-        logging.debug(f"Detected '{model.get_canonical_link()}' as root link")
-        canonical_link: rod.Link = {l.name: l for l in model.links()}[
-            model.get_canonical_link()
-        ]
-
-        # If the canonical link has a custom pose, notify that it will be ignored.
-        # In fact, it might happen that the canonical link has a custom pose w.r.t.
-        # the __model__ frame. In SDF, the __model__frame defines the default reference
-        # of a model, instead in URDF this reference is represented by the root link
-        # (that is, by definition, the SDF canonical link).
+        # Add dynamics if available and not a fixed joint
         if (
-            not model.is_fixed_base()
-            and canonical_link.pose is not None
-            and not np.allclose(canonical_link.pose.pose, np.zeros(6))
+            joint.axis is not None
+            and joint.axis.dynamics is not None
+            and {joint.axis.dynamics.damping, joint.axis.dynamics.friction} != {None}
+            and urdf_joint_type != "fixed"
         ):
-            msg = "Ignoring non-trivial pose of canonical link '{name}'"
-            logging.warning(msg.format(name=canonical_link.name))
-            canonical_link.pose = None
 
-        # Convert all poses to use the Urdf frames convention.
-        # This process drastically simplifies extracting compatible kinematic transforms.
-        # Furthermore, it post-processes frames such that they get directly attached to
-        # a real link (instead of being attached to other frames).
-        model.switch_frame_convention(
-            frame_convention=rod.FrameConvention.Urdf,
-            explicit_frames=True,
-            attach_frames_to_links=True,
-        )
+            dynamics = {}
+            if joint.axis.dynamics.damping is not None:
+                dynamics["@damping"] = joint.axis.dynamics.damping
+            if joint.axis.dynamics.friction is not None:
+                dynamics["@friction"] = joint.axis.dynamics.friction
 
-        # ============================================
-        # Convert SDF frames to URDF equivalent chains
-        # ============================================
+            if dynamics:
+                joint_dict["dynamics"] = dynamics
 
-        # Initialize the containers of extra links and joints
-        extra_links_from_frames: list[dict[str, Any]] = []
-        extra_joints_from_frames: list[dict[str, Any]] = []
+        # Add limits if needed and not a fixed joint
+        limit_dict = {}
 
-        # Since URDF does not support plain frames as SDF, we convert all frames
-        # to (fixed_joint->dummy_link) sequences
-        for frame in model.frames():
+        if (
+            joint.axis is not None
+            and joint.axis.limit is not None
+            and urdf_joint_type in {"revolute", "prismatic", "continuous"}
+        ):
 
-            # New dummy link with same name of the frame
-            dummy_link = {
-                "@name": frame.name,
-                "inertial": {
-                    "origin": {
-                        "@xyz": "0 0 0",
-                        "@rpy": "0 0 0",
-                    },
-                    "mass": {"@value": 0.0},
-                    "inertia": {
-                        "@ixx": 0.0,
-                        "@ixy": 0.0,
-                        "@ixz": 0.0,
-                        "@iyy": 0.0,
-                        "@iyz": 0.0,
-                        "@izz": 0.0,
-                    },
-                },
-            }
-
-            # Note: the pose of the frame in FrameConvention.Urdf already
-            # refers to the parent link, so we can directly use it.
-            assert frame.pose.relative_to == frame.attached_to
-
-            # New joint connecting the link to which the frame is attached
-            # to the new dummy link.
-            new_joint = {
-                "@name": f"{frame.attached_to}_to_{dummy_link['@name']}",
-                "@type": "fixed",
-                "parent": {"@link": frame.attached_to},
-                "child": {"@link": dummy_link["@name"]},
-                "origin": {
-                    "@xyz": " ".join(np.array(frame.pose.xyz, dtype=str)),
-                    "@rpy": " ".join(np.array(frame.pose.rpy, dtype=str)),
-                },
-            }
-
-            logging.debug(
-                "Processing frame '{}': created new dummy chain {}->({})->{}".format(
-                    frame.name,
-                    frame.attached_to,
-                    new_joint["@name"],
-                    dummy_link["@name"],
-                )
+            # Effort and velocity get defaults if not specified
+            limit_dict["@effort"] = self._get_or_default(
+                joint.axis.limit.effort, np.finfo(np.float32).max
+            )
+            limit_dict["@velocity"] = self._get_or_default(
+                joint.axis.limit.velocity, np.finfo(np.float32).max
             )
 
-            extra_links_from_frames.append(dummy_link)
-            extra_joints_from_frames.append(new_joint)
+            # Lower and upper only for revolute and prismatic joints (not continuous)
+            if urdf_joint_type in {"revolute", "prismatic"}:
+                if joint.axis.limit.lower is not None and not np.isinf(
+                    joint.axis.limit.lower
+                ):
+                    limit_dict["@lower"] = joint.axis.limit.lower
+                if joint.axis.limit.upper is not None and not np.isinf(
+                    joint.axis.limit.upper
+                ):
+                    limit_dict["@upper"] = joint.axis.limit.upper
 
-        # =====================
-        # Preserve fixed joints
-        # =====================
+        if limit_dict:
+            joint_dict["limit"] = limit_dict
 
-        # This attribute could either be list of fixed joint names to preserve,
-        # or a boolean to preserve all fixed joints.
-        gazebo_preserve_fixed_joints = copy.copy(self.gazebo_preserve_fixed_joints)
+        return joint_dict
 
-        # If it is a boolean, automatically populate the list with all fixed joints.
-        if gazebo_preserve_fixed_joints is True:
-            gazebo_preserve_fixed_joints = [
-                j.name for j in model.joints() if j.type == "fixed"
-            ]
+    @staticmethod
+    def _get_or_default(value: T | None, default: T) -> T:
+        """Return the value if not None, otherwise the default."""
 
-        if gazebo_preserve_fixed_joints is False:
-            gazebo_preserve_fixed_joints = []
-
-        assert isinstance(gazebo_preserve_fixed_joints, list)
-
-        # Check that all fixed joints to preserve are actually present in the model.
-        for fixed_joint_name in gazebo_preserve_fixed_joints:
-            logging.debug(f"Preserving fixed joint '{fixed_joint_name}'")
-            all_model_joint_names = {j.name for j in model.joints()}
-            if fixed_joint_name not in all_model_joint_names:
-                raise RuntimeError(f"Joint '{fixed_joint_name}' not found in the model")
-
-        # ===================
-        # Convert SDF to URDF
-        # ===================
-
-        # In URDF, links are directly attached to the frame of their parent joint
-        for link in model.links():
-            if link.pose is not None and not np.allclose(link.pose.pose, np.zeros(6)):
-                msg = "Ignoring non-trivial pose of link '{name}'"
-                logging.warning(msg.format(name=link.name))
-                link.pose = None
-
-        # Define the 'world' link used for fixed-base models
-        world_link = rod.Link(name="world")
-
-        # Create a new dict in xmldict format with only the elements supported by URDF
-        urdf_dict = {
-            "robot": {
-                **{"@name": model.name},
-                # http://wiki.ros.org/urdf/XML/link
-                "link": ([world_link.to_dict()] if model.is_fixed_base() else [])
-                + [
-                    {
-                        "@name": l.name,
-                        "inertial": {
-                            "origin": {
-                                "@xyz": " ".join(map(str, l.inertial.pose.xyz)),
-                                "@rpy": " ".join(map(str, l.inertial.pose.rpy)),
-                            },
-                            "mass": {"@value": l.inertial.mass},
-                            "inertia": {
-                                "@ixx": l.inertial.inertia.ixx,
-                                "@ixy": l.inertial.inertia.ixy,
-                                "@ixz": l.inertial.inertia.ixz,
-                                "@iyy": l.inertial.inertia.iyy,
-                                "@iyz": l.inertial.inertia.iyz,
-                                "@izz": l.inertial.inertia.izz,
-                            },
-                        },
-                        "visual": [
-                            {
-                                "@name": v.name,
-                                "origin": {
-                                    "@xyz": " ".join(map(str, v.pose.xyz)),
-                                    "@rpy": " ".join(map(str, v.pose.rpy)),
-                                },
-                                "geometry": UrdfExporter._rod_geometry_to_xmltodict(
-                                    geometry=v.geometry
-                                ),
-                                **(
-                                    {
-                                        "material": UrdfExporter._rod_material_to_xmltodict(
-                                            material=v.material
-                                        )
-                                    }
-                                    if v.material is not None
-                                    else {}
-                                ),
-                            }
-                            for v in l.visuals()
-                        ],
-                        "collision": [
-                            {
-                                "@name": c.name,
-                                "origin": {
-                                    "@xyz": " ".join(map(str, c.pose.xyz)),
-                                    "@rpy": " ".join(map(str, c.pose.rpy)),
-                                },
-                                "geometry": UrdfExporter._rod_geometry_to_xmltodict(
-                                    geometry=c.geometry
-                                ),
-                            }
-                            for c in l.collisions()
-                        ],
-                    }
-                    for l in model.links()
-                ]
-                # Add the extra links resulting from the frame->dummy_link conversion
-                + extra_links_from_frames,
-                # http://wiki.ros.org/urdf/XML/joint
-                "joint": [
-                    UrdfExporter._joint_to_urdf_dict(j)
-                    for j in model.joints()
-                    if j.type in UrdfExporter.SupportedSdfJointTypes
-                ]
-                # Add the extra joints resulting from the frame->link conversion
-                + extra_joints_from_frames,
-                # Extra gazebo-related elements
-                # https://classic.gazebosim.org/tutorials?tut=ros_urdf
-                # https://github.com/gazebosim/sdformat/issues/199#issuecomment-622127508
-                "gazebo": [
-                    {
-                        "@reference": fixed_joint,
-                        "preserveFixedJoint": "true",
-                        "disableFixedJointLumping": "true",
-                    }
-                    for fixed_joint in gazebo_preserve_fixed_joints
-                ],
-            }
-        }
-
-        return xmltodict.unparse(
-            input_dict=urdf_dict,
-            pretty=self.pretty,
-            indent=self.indent,
-            short_empty_elements=True,
-        )
+        return value if value is not None else default
 
     @staticmethod
     def _rod_geometry_to_xmltodict(geometry: rod.Geometry) -> dict[str, Any]:
-        return {
-            **(
-                {"box": {"@size": " ".join(np.array(geometry.box.size, dtype=str))}}
-                if geometry.box is not None
-                else {}
-            ),
-            **(
-                {
-                    "cylinder": {
-                        "@radius": geometry.cylinder.radius,
-                        "@length": geometry.cylinder.length,
-                    }
-                }
-                if geometry.cylinder is not None
-                else {}
-            ),
-            **(
-                {"sphere": {"@radius": geometry.sphere.radius}}
-                if geometry.sphere is not None
-                else {}
-            ),
-            **(
-                {
-                    "mesh": {
-                        "@filename": geometry.mesh.uri,
-                        "@scale": " ".join(map(str, geometry.mesh.scale)),
-                    }
-                }
-                if geometry.mesh is not None
-                else {}
-            ),
-        }
+        """Convert ROD geometry to XML dictionary format."""
 
-    @staticmethod
-    def _rod_material_to_xmltodict(material: rod.Material) -> dict[str, Any]:
+        result = {}
+
+        if geometry.box is not None:
+            result["box"] = {"@size": _fmt(geometry.box.size)}
+        elif geometry.cylinder is not None:
+            result["cylinder"] = {
+                "@radius": geometry.cylinder.radius,
+                "@length": geometry.cylinder.length,
+            }
+        elif geometry.sphere is not None:
+            result["sphere"] = {"@radius": geometry.sphere.radius}
+        elif geometry.mesh is not None:
+            result["mesh"] = {
+                "@filename": geometry.mesh.uri,
+                "@scale": _fmt(geometry.mesh.scale),
+            }
+
+        return result
+
+    @classmethod
+    def _rod_material_to_xmltodict(cls, material: rod.Material) -> dict[str, Any]:
+        """Convert ROD material to XML dictionary format."""
+
         if material.script is not None:
-            msg = "Material scripts are not supported, returning default material"
-            logging.info(msg=msg)
-            return UrdfExporter.DefaultMaterial
+            logging.info(
+                "Material scripts are not supported, returning default material"
+            )
+            return cls.DEFAULT_MATERIAL
 
         if material.diffuse is None:
-            msg = "Material diffuse color is not defined, returning default material"
-            logging.info(msg=msg)
-            return UrdfExporter.DefaultMaterial
+            logging.info(
+                "Material diffuse color is not defined, returning default material"
+            )
+            return cls.DEFAULT_MATERIAL
 
         return {
-            "@name": f"color_{hash(' '.join(map(str, material.diffuse)))}",
+            "@name": f"color_{hash(_fmt(material.diffuse))}",
             "color": {
-                "@rgba": " ".join(map(str, material.diffuse)),
+                "@rgba": _fmt(material.diffuse),
             },
-            # "texture": {"@filename": None},  # TODO
         }

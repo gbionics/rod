@@ -1,3 +1,4 @@
+import functools
 import os
 import pathlib
 import shutil
@@ -50,6 +51,12 @@ class GazeboHelper:
             return False
 
     @staticmethod
+    @functools.lru_cache(maxsize=128)
+    def _get_cached_processing(content: str) -> str:
+        """Internal cached processing method."""
+        return GazeboHelper._process_with_sdformat_uncached(content)
+
+    @staticmethod
     def process_model_description_with_sdformat(
         model_description: str | pathlib.Path,
     ) -> str:
@@ -82,32 +89,41 @@ class GazeboHelper:
             model_description_string = model_description
 
         # ================================
-        # Process the string with sdformat
+        # Use caching for repeated content
         # ================================
 
+        return GazeboHelper._get_cached_processing(model_description_string)
+
+    @staticmethod
+    def _process_with_sdformat_uncached(model_description_string: str) -> str:
+        """Internal method for actual SDF processing without caching."""
         # Get the Gazebo Sim executable (raises exception if not found)
         gazebo_executable = GazeboHelper.get_gazebo_executable()
 
-        # Operate on a file stored in a temporary directory.
-        # This is necessary on windows because the file has to be closed before
-        # it can be processed by the sdformat executable.
-        # As soon as 3.12 will be the minimum supported version, we can use just
-        # NamedTemporaryFile with the new delete_on_close=False parameter.
-        with tempfile.TemporaryDirectory() as tmp:
+        fd, tmp_path = tempfile.mkstemp(suffix=".xml", prefix="rod_sdf_")
+        temp_file = pathlib.Path(tmp_path)
 
-            with tempfile.NamedTemporaryFile(
-                mode="w+", suffix=".xml", dir=tmp, delete=False
-            ) as fp:
+        try:
+            # Write via the file descriptor returned by mkstemp to avoid a
+            # separate open() call (the fd is already open and exclusive).
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(model_description_string)
 
-                fp.write(model_description_string)
-                fp.close()
-
+            # Process with optimized subprocess call
             try:
                 cp = subprocess.run(
-                    [str(gazebo_executable), "sdf", "-p", fp.name],
+                    [str(gazebo_executable), "sdf", "-p", str(temp_file)],
                     text=True,
                     capture_output=True,
                     check=True,
+                    bufsize=-1,  # Use system default buffer size
+                    env=dict(
+                        os.environ,
+                        **{
+                            "IGN_PARTITION": "rod_processing",  # Avoid interference with running Gazebo
+                            "GZ_PARTITION": "rod_processing",
+                        },
+                    ),
                 )
             except subprocess.CalledProcessError as e:
                 if e.returncode != 0:
@@ -116,11 +132,31 @@ class GazeboHelper:
                         "Failed to process the input with sdformat"
                     ) from e
 
+        finally:
+            temp_file.unlink(missing_ok=True)
+
         # Get the resulting SDF string
         sdf_string = cp.stdout
 
         # There might be warnings in the output, so we remove them by finding the
         # first <sdf> tag and ignoring everything before it
-        sdf_string = sdf_string[sdf_string.find("<sdf") :]
+        sdf_start = sdf_string.find("<sdf")
+        if sdf_start != -1:
+            sdf_string = sdf_string[sdf_start:]
 
         return sdf_string
+
+    @staticmethod
+    def process_multiple_descriptions(
+        descriptions: list[str | pathlib.Path],
+    ) -> list[str]:
+        """Process multiple SDF descriptions in batch for better performance."""
+        results = []
+        for desc in descriptions:
+            results.append(GazeboHelper.process_model_description_with_sdformat(desc))
+        return results
+
+    @classmethod
+    def clear_cache(cls) -> None:
+        """Clear the processing cache to free memory."""
+        cls._get_cached_processing.cache_clear()

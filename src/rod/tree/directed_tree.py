@@ -1,5 +1,6 @@
 import dataclasses
 import functools
+from collections import deque
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
@@ -35,17 +36,13 @@ class DirectedTree(Sequence):
         root: DirectedTreeNode,
         sort_children: Callable[[Any], Any] | None = lambda node: node.name(),
     ) -> Iterable[DirectedTreeNode]:
-        queue = [root]
-
-        # We assume that nodes have a unique name, and we mark a node as visited by
-        # storing its name. This assumption speeds up considerably object comparison.
-        visited = []
-        visited.append(root.name)
+        queue = deque([root])
+        visited = {root.name}
 
         yield root
 
-        while len(queue) > 0:
-            node = queue.pop(0)
+        while queue:
+            node = queue.popleft()
 
             # Note: sorting the nodes with their name so that the order of children
             #       insertion does not matter when assigning the node index
@@ -53,7 +50,7 @@ class DirectedTree(Sequence):
                 if child.name in visited:
                     continue
 
-                visited.append(child.name)
+                visited.add(child.name)
                 queue.append(child)
 
                 yield child
@@ -71,23 +68,18 @@ class DirectedTree(Sequence):
     def __getitem__(
         self, key: int | slice | str
     ) -> DirectedTreeNode | list[DirectedTreeNode]:
-        # Get the nodes' dictionary (already inserted in order following BFS)
-        nodes_dict = self.nodes_dict
-
         if isinstance(key, str):
-            if key not in nodes_dict.keys():
+            if key not in self.nodes_dict:
                 raise KeyError(key)
-
-            return nodes_dict[key]
+            return self.nodes_dict[key]
 
         if isinstance(key, int):
-            if key > len(nodes_dict):
+            if key >= len(self):
                 raise IndexError(key)
-
-            return list(nodes_dict.values())[key]
+            return self.nodes[key]
 
         if isinstance(key, slice):
-            return list(nodes_dict.values())[key]
+            return self.nodes[key]
 
         raise TypeError(type(key).__name__)
 
@@ -102,9 +94,9 @@ class DirectedTree(Sequence):
 
     def __contains__(self, item: str | DirectedTreeNode) -> bool:
         if isinstance(item, str):
-            return item in self.nodes_dict.keys()
+            return item in self.nodes_dict
 
         if isinstance(item, DirectedTreeNode):
-            return item.name() in self.nodes_dict.keys()
+            return item.name() in self.nodes_dict
 
         raise TypeError(type(item).__name__)
