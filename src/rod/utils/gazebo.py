@@ -1,5 +1,4 @@
 import functools
-import hashlib
 import os
 import pathlib
 import shutil
@@ -53,7 +52,7 @@ class GazeboHelper:
 
     @staticmethod
     @functools.lru_cache(maxsize=128)
-    def _get_cached_processing(content_hash: str, content: str) -> str:
+    def _get_cached_processing(content: str) -> str:
         """Internal cached processing method."""
         return GazeboHelper._process_with_sdformat_uncached(content)
 
@@ -93,13 +92,7 @@ class GazeboHelper:
         # Use caching for repeated content
         # ================================
 
-        # Create hash of content for caching
-        content_hash = hashlib.md5(model_description_string.encode()).hexdigest()
-
-        # Try to get from cache first
-        return GazeboHelper._get_cached_processing(
-            content_hash, model_description_string
-        )
+        return GazeboHelper._get_cached_processing(model_description_string)
 
     @staticmethod
     def _process_with_sdformat_uncached(model_description_string: str) -> str:
