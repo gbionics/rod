@@ -1,5 +1,6 @@
 import dataclasses
 import functools
+from collections import deque
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
@@ -35,17 +36,13 @@ class DirectedTree(Sequence):
         root: DirectedTreeNode,
         sort_children: Callable[[Any], Any] | None = lambda node: node.name(),
     ) -> Iterable[DirectedTreeNode]:
-        queue = [root]
-
-        # We assume that nodes have a unique name, and we mark a node as visited by
-        # storing its name. This assumption speeds up considerably object comparison.
-        visited = []
-        visited.append(root.name)
+        queue = deque([root])
+        visited = {root.name}
 
         yield root
 
-        while len(queue) > 0:
-            node = queue.pop(0)
+        while queue:
+            node = queue.popleft()
 
             # Note: sorting the nodes with their name so that the order of children
             #       insertion does not matter when assigning the node index
@@ -53,7 +50,7 @@ class DirectedTree(Sequence):
                 if child.name in visited:
                     continue
 
-                visited.append(child.name)
+                visited.add(child.name)
                 queue.append(child)
 
                 yield child
