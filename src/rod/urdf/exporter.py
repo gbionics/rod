@@ -46,7 +46,6 @@ class UrdfExporter(abc.ABC):
         },
     }
 
-
     def to_urdf_string(self, sdf: rod.Sdf | rod.Model) -> str:
         """Convert an in-memory SDF model to a URDF string.
 
@@ -370,12 +369,32 @@ class UrdfExporter(abc.ABC):
             if joint.type in self.SUPPORTED_JOINT_TYPES
         ]
 
+    @staticmethod
+    def _get_urdf_joint_type(joint: rod.Joint) -> str:
+        """
+        Get the URDF joint type, converting revolute joints with infinite limits to continuous.
+
+        sdformat converts URDF continuous joints to SDF revolute joints with infinite limits,
+        so we need to convert them back to continuous when exporting to URDF.
+        """
+        if (
+            joint.type == "revolute"
+            and joint.axis is not None
+            and joint.axis.limit is not None
+            and (joint.axis.limit.lower is None or np.isinf(joint.axis.limit.lower))
+            and (joint.axis.limit.upper is None or np.isinf(joint.axis.limit.upper))
+        ):
+            return "continuous"
+        return joint.type
+
     def _joint_to_dict(self, joint: rod.Joint) -> dict[str, Any]:
         """Convert a joint to a dictionary representation."""
 
+        urdf_joint_type = self._get_urdf_joint_type(joint)
+
         joint_dict = {
             "@name": joint.name,
-            "@type": joint.type,
+            "@type": urdf_joint_type,
             "origin": {
                 "@xyz": " ".join(map(str, joint.pose.xyz)),
                 "@rpy": " ".join(map(str, joint.pose.rpy)),
@@ -388,7 +407,7 @@ class UrdfExporter(abc.ABC):
         if (
             joint.axis is not None
             and joint.axis.xyz is not None
-            and joint.type != "fixed"
+            and urdf_joint_type != "fixed"
         ):
             joint_dict["axis"] = {"@xyz": " ".join(map(str, joint.axis.xyz.xyz))}
 
@@ -397,7 +416,7 @@ class UrdfExporter(abc.ABC):
             joint.axis is not None
             and joint.axis.dynamics is not None
             and {joint.axis.dynamics.damping, joint.axis.dynamics.friction} != {None}
-            and joint.type != "fixed"
+            and urdf_joint_type != "fixed"
         ):
 
             dynamics = {}
@@ -415,7 +434,7 @@ class UrdfExporter(abc.ABC):
         if (
             joint.axis is not None
             and joint.axis.limit is not None
-            and joint.type in {"revolute", "prismatic"}
+            and urdf_joint_type in {"revolute", "prismatic", "continuous"}
         ):
 
             # Effort and velocity get defaults if not specified
@@ -426,11 +445,15 @@ class UrdfExporter(abc.ABC):
                 joint.axis.limit.velocity, np.finfo(np.float32).max
             )
 
-            # Lower and upper only for revolute and prismatic joints
-            if joint.type in {"revolute", "prismatic"}:
-                if joint.axis.limit.lower is not None:
+            # Lower and upper only for revolute and prismatic joints (not continuous)
+            if urdf_joint_type in {"revolute", "prismatic"}:
+                if joint.axis.limit.lower is not None and not np.isinf(
+                    joint.axis.limit.lower
+                ):
                     limit_dict["@lower"] = joint.axis.limit.lower
-                if joint.axis.limit.upper is not None:
+                if joint.axis.limit.upper is not None and not np.isinf(
+                    joint.axis.limit.upper
+                ):
                     limit_dict["@upper"] = joint.axis.limit.upper
 
         joint_dict["limit"] = limit_dict
