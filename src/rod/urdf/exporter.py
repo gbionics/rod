@@ -462,7 +462,8 @@ class UrdfExporter(abc.ABC):
                 ):
                     limit_dict["@upper"] = joint.axis.limit.upper
 
-        joint_dict["limit"] = limit_dict
+        if limit_dict:
+            joint_dict["limit"] = limit_dict
 
         return joint_dict
 
