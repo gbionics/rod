@@ -162,7 +162,7 @@ jobs:
 
       - name: Publish to PyPI
         if: |
-          github.repository == 'ami-iit/rod' &&
+          github.repository == 'gbionics/rod' &&
           ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
            (github.event_name == 'release' && github.event.action == 'published'))
         uses: pypa/gh-action-pypi-publish@release/v1
