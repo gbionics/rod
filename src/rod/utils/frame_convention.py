@@ -63,11 +63,12 @@ def _get_frame_function(convention: FrameConvention, model: rod.Model):
 
     # Pre-compute mappings for SDF and URDF
     if convention in (FrameConvention.Sdf, FrameConvention.Urdf):
+        links = model.links()
         visual_map = {
-            v.name: link.name for link in model.links() for v in link.visuals()
+            v.name: link.name for link in links for v in link.visuals()
         }
         collision_map = {
-            c.name: link.name for link in model.links() for c in link.collisions()
+            c.name: link.name for link in links for c in link.collisions()
         }
 
         if convention == FrameConvention.Urdf:
