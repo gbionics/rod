@@ -161,8 +161,7 @@ class UrdfExporter(abc.ABC):
         canonical_link_name = model.get_canonical_link()
         logging.debug(f"Detected '{canonical_link_name}' as root link")
 
-        link_dict = {l.name: l for l in model.links()}
-        canonical_link = link_dict[canonical_link_name]
+        canonical_link = next(l for l in model.links() if l.name == canonical_link_name)
 
         # Check if canonical link has a custom pose
         if (
