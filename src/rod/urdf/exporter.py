@@ -25,6 +25,11 @@ T = TypeVar("T")  # Generic type for optional handling
 _ZERO_POSE = np.zeros(6)
 
 
+def _fmt(values) -> str:
+    """Format a sequence of numbers as a space-separated string."""
+    return " ".join(str(v) for v in values)
+
+
 @dataclasses.dataclass
 class UrdfExporter(abc.ABC):
     """Resources to convert an in-memory ROD model to URDF with elegant Pythonic patterns."""
@@ -44,7 +49,7 @@ class UrdfExporter(abc.ABC):
     DEFAULT_MATERIAL: ClassVar[dict[str, Any]] = {
         "@name": "default_material",
         "color": {
-            "@rgba": " ".join(map(str, [1, 1, 1, 1])),
+            "@rgba": _fmt([1, 1, 1, 1]),
         },
     }
 
@@ -227,8 +232,8 @@ class UrdfExporter(abc.ABC):
             "parent": {"@link": frame.attached_to},
             "child": {"@link": dummy_link_name},
             "origin": {
-                "@xyz": " ".join(np.array(frame.pose.xyz, dtype=str)),
-                "@rpy": " ".join(np.array(frame.pose.rpy, dtype=str)),
+                "@xyz": _fmt(frame.pose.xyz),
+                "@rpy": _fmt(frame.pose.rpy),
             },
         }
 
@@ -312,8 +317,8 @@ class UrdfExporter(abc.ABC):
 
         return {
             "origin": {
-                "@xyz": " ".join(map(str, link.inertial.pose.xyz)),
-                "@rpy": " ".join(map(str, link.inertial.pose.rpy)),
+                "@xyz": _fmt(link.inertial.pose.xyz),
+                "@rpy": _fmt(link.inertial.pose.rpy),
             },
             "mass": {"@value": link.inertial.mass},
             "inertia": {
@@ -333,8 +338,8 @@ class UrdfExporter(abc.ABC):
             {
                 "@name": visual.name,
                 "origin": {
-                    "@xyz": " ".join(map(str, visual.pose.xyz)),
-                    "@rpy": " ".join(map(str, visual.pose.rpy)),
+                    "@xyz": _fmt(visual.pose.xyz),
+                    "@rpy": _fmt(visual.pose.rpy),
                 },
                 "geometry": self._rod_geometry_to_xmltodict(visual.geometry),
                 **(
@@ -353,8 +358,8 @@ class UrdfExporter(abc.ABC):
             {
                 "@name": collision.name,
                 "origin": {
-                    "@xyz": " ".join(map(str, collision.pose.xyz)),
-                    "@rpy": " ".join(map(str, collision.pose.rpy)),
+                    "@xyz": _fmt(collision.pose.xyz),
+                    "@rpy": _fmt(collision.pose.rpy),
                 },
                 "geometry": self._rod_geometry_to_xmltodict(collision.geometry),
             }
@@ -397,8 +402,8 @@ class UrdfExporter(abc.ABC):
             "@name": joint.name,
             "@type": urdf_joint_type,
             "origin": {
-                "@xyz": " ".join(map(str, joint.pose.xyz)),
-                "@rpy": " ".join(map(str, joint.pose.rpy)),
+                "@xyz": _fmt(joint.pose.xyz),
+                "@rpy": _fmt(joint.pose.rpy),
             },
             "parent": {"@link": joint.parent},
             "child": {"@link": joint.child},
@@ -410,7 +415,7 @@ class UrdfExporter(abc.ABC):
             and joint.axis.xyz is not None
             and urdf_joint_type != "fixed"
         ):
-            joint_dict["axis"] = {"@xyz": " ".join(map(str, joint.axis.xyz.xyz))}
+            joint_dict["axis"] = {"@xyz": _fmt(joint.axis.xyz.xyz)}
 
         # Add dynamics if available and not a fixed joint
         if (
@@ -474,7 +479,7 @@ class UrdfExporter(abc.ABC):
         result = {}
 
         if geometry.box is not None:
-            result["box"] = {"@size": " ".join(np.array(geometry.box.size, dtype=str))}
+            result["box"] = {"@size": _fmt(geometry.box.size)}
         elif geometry.cylinder is not None:
             result["cylinder"] = {
                 "@radius": geometry.cylinder.radius,
@@ -485,7 +490,7 @@ class UrdfExporter(abc.ABC):
         elif geometry.mesh is not None:
             result["mesh"] = {
                 "@filename": geometry.mesh.uri,
-                "@scale": " ".join(map(str, geometry.mesh.scale)),
+                "@scale": _fmt(geometry.mesh.scale),
             }
 
         return result
@@ -507,8 +512,8 @@ class UrdfExporter(abc.ABC):
             return cls.DEFAULT_MATERIAL
 
         return {
-            "@name": f"color_{hash(' '.join(map(str, material.diffuse)))}",
+            "@name": f"color_{hash(_fmt(material.diffuse))}",
             "color": {
-                "@rgba": " ".join(map(str, material.diffuse)),
+                "@rgba": _fmt(material.diffuse),
             },
         }
