@@ -100,23 +100,14 @@ class GazeboHelper:
         # Get the Gazebo Sim executable (raises exception if not found)
         gazebo_executable = GazeboHelper.get_gazebo_executable()
 
-        # Use faster temporary file approach - write directly to /tmp on Unix systems
-        # This avoids Python's overhead of TemporaryDirectory context manager
-        # As soon as 3.12 will be the minimum supported version, we can use just
-        # NamedTemporaryFile with the new delete_on_close=False parameter.
-        if os.name == "posix":  # Unix-like systems
-            tmp_dir = pathlib.Path("/tmp")
-        else:
-            tmp_dir = pathlib.Path(tempfile.gettempdir())
-
-        temp_file = (
-            tmp_dir
-            / f"rod_sdf_{os.getpid()}_{hash(model_description_string) & 0x7fffffff}.xml"
-        )
+        fd, tmp_path = tempfile.mkstemp(suffix=".xml", prefix="rod_sdf_")
+        temp_file = pathlib.Path(tmp_path)
 
         try:
-            # Write file directly
-            temp_file.write_text(model_description_string, encoding="utf-8")
+            # Write via the file descriptor returned by mkstemp to avoid a
+            # separate open() call (the fd is already open and exclusive).
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(model_description_string)
 
             # Process with optimized subprocess call
             try:
@@ -125,7 +116,6 @@ class GazeboHelper:
                     text=True,
                     capture_output=True,
                     check=True,
-                    # Add performance optimizations
                     bufsize=-1,  # Use system default buffer size
                     env=dict(
                         os.environ,
@@ -143,9 +133,7 @@ class GazeboHelper:
                     ) from e
 
         finally:
-            # Clean up temp file
-            if temp_file.exists():
-                temp_file.unlink()
+            temp_file.unlink(missing_ok=True)
 
         # Get the resulting SDF string
         sdf_string = cp.stdout
