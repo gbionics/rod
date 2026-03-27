@@ -132,7 +132,8 @@ class KinematicTree(DirectedTree):
             (edge.child, edge.parent) if keep_parent else (edge.parent, edge.child)
         )
         new_node = dataclasses.replace(
-            replaced_node, parent=removed_node.parent if not keep_parent else None
+            replaced_node,
+            parent=replaced_node.parent if keep_parent else removed_node.parent,
         )
         removed_edge_as_frame = TreeFrame.from_edge(edge=edge, attached_to=new_node)
         removed_node_as_frame = TreeFrame.from_node(
