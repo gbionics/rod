@@ -68,23 +68,18 @@ class DirectedTree(Sequence):
     def __getitem__(
         self, key: int | slice | str
     ) -> DirectedTreeNode | list[DirectedTreeNode]:
-        # Get the nodes' dictionary (already inserted in order following BFS)
-        nodes_dict = self.nodes_dict
-
         if isinstance(key, str):
-            if key not in nodes_dict.keys():
+            if key not in self.nodes_dict:
                 raise KeyError(key)
-
-            return nodes_dict[key]
+            return self.nodes_dict[key]
 
         if isinstance(key, int):
-            if key > len(nodes_dict):
+            if key >= len(self):
                 raise IndexError(key)
-
-            return list(nodes_dict.values())[key]
+            return self.nodes[key]
 
         if isinstance(key, slice):
-            return list(nodes_dict.values())[key]
+            return self.nodes[key]
 
         raise TypeError(type(key).__name__)
 
@@ -99,9 +94,9 @@ class DirectedTree(Sequence):
 
     def __contains__(self, item: str | DirectedTreeNode) -> bool:
         if isinstance(item, str):
-            return item in self.nodes_dict.keys()
+            return item in self.nodes_dict
 
         if isinstance(item, DirectedTreeNode):
-            return item.name() in self.nodes_dict.keys()
+            return item.name() in self.nodes_dict
 
         raise TypeError(type(item).__name__)
