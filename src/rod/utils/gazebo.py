@@ -5,13 +5,10 @@ import pathlib
 import shutil
 import subprocess
 import tempfile
-from typing import ClassVar
 
 
 class GazeboHelper:
     _cached_executable: pathlib.Path | None = None
-    _process_cache: ClassVar[dict[str, str]] = {}
-    _max_cache_size: int = 100
 
     @classmethod
     def get_gazebo_executable(cls) -> pathlib.Path:
@@ -182,4 +179,3 @@ class GazeboHelper:
     def clear_cache(cls) -> None:
         """Clear the processing cache to free memory."""
         cls._get_cached_processing.cache_clear()
-        cls._process_cache.clear()
