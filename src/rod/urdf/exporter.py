@@ -22,6 +22,8 @@ JointsList: TypeAlias = list[dict[str, Any]]
 PreserveJointsOption: TypeAlias = bool | list[str]
 T = TypeVar("T")  # Generic type for optional handling
 
+_ZERO_POSE = np.zeros(6)
+
 
 @dataclasses.dataclass
 class UrdfExporter(abc.ABC):
@@ -135,7 +137,7 @@ class UrdfExporter(abc.ABC):
 
         # Clean up link poses (in URDF, links are attached to parent joint frames)
         for link in model.links():
-            if link.pose is not None and not np.allclose(link.pose.pose, np.zeros(6)):
+            if link.pose is not None and not np.allclose(link.pose.pose, _ZERO_POSE):
                 logging.warning(f"Ignoring non-trivial pose of link '{link.name}'")
                 link.pose = None
 
@@ -148,7 +150,7 @@ class UrdfExporter(abc.ABC):
         if (
             model.is_fixed_base()
             and model.pose is not None
-            and not np.allclose(model.pose.pose, np.zeros(6))
+            and not np.allclose(model.pose.pose, _ZERO_POSE)
         ):
             logging.warning("Ignoring non-trivial pose of fixed-base model")
             model.pose = None
@@ -166,7 +168,7 @@ class UrdfExporter(abc.ABC):
         if (
             not model.is_fixed_base()
             and canonical_link.pose is not None
-            and not np.allclose(canonical_link.pose.pose, np.zeros(6))
+            and not np.allclose(canonical_link.pose.pose, _ZERO_POSE)
         ):
             logging.warning(
                 f"Ignoring non-trivial pose of canonical link '{canonical_link.name}'"
