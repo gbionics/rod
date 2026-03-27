@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import dataclasses
 
 import numpy as np
@@ -23,9 +22,6 @@ class TreeTransforms:
 
     @staticmethod
     def build(model: rod.Model, is_top_level: bool = True) -> TreeTransforms:
-        model = copy.deepcopy(model)
-        model.resolve_frames(is_top_level=is_top_level, explicit_frames=True)
-
         kinematic_tree = KinematicTree.build(model=model, is_top_level=is_top_level)
 
         # Build the kinematic tree and return the TreeTransforms object.
